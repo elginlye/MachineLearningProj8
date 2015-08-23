@@ -1,0 +1,128 @@
+---
+title: "Machine Learning Assignment"
+author: "LYE Keng Fook"
+date: "Sunday, August 23, 2015"
+output: html_document
+---
+
+## Executive Summary
+
+The goal of this project is to predict the manner in which 6 male participants perform barbell lifts correctly and incorrectly in 5 different ways. These 5 ways are captured in the classe variable, with values A thru E in the training dataset. 
+
+A total of 4 sensors are mounted in the participants' arm, forearm, belt and dumbbell. The raw sensor readings are captured as variables in the dataset, along with 96 derived variables (summary statistics) such as mean (avg), variance (var), standard deviation (stddev), max, min, amplitude (amp), kurtosis and skewness.
+
+More information is available from the [Human Activity Recognition website](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset). 
+
+## Initialize environment
+```{r init libraries, warning=FALSE, message=FALSE}
+library(cluster)
+library(parallel)
+library(doSNOW)
+
+coreNumber=max(detectCores(),1)
+cluster=makeCluster(coreNumber, type = "SOCK",outfile="")
+registerDoSNOW(cluster)
+
+library(caret)
+set.seed(1234)
+```
+
+# Prepare data
+```{r prep data, warning=FALSE}
+pmlData <- read.csv("pml-training.csv")
+
+# Remove first 7 columns which are meta-data (book keeping data): 
+#   "X" "user_name" raw_timestamp_part_1" "raw_timestamp_part_2" "cvtd_timestamp" "new_window" "num_window"
+# Remove observations  with new_window = "yes", these observations are summary statistics. 
+df <- pmlData[pmlData$new_window != "yes", -c(1:7)]
+
+# Partition data into training and test set for cross-validation 
+inTrain = createDataPartition(df$classe, p = 0.7)[[1]]
+training = df[inTrain,]
+test = df[-inTrain,]
+
+# Remove near zero variance predictors
+nzv <- nearZeroVar(training)
+training <- training[, -nzv]
+test <- test[,-nzv]
+```
+
+
+# Train prediction models
+Since this is a classification problem, I evaluated accuracy of 3 models:   
+1. Linear discriminate analysis   
+2. Random forest   
+3. Boosting   
+```{r LDA, warning=FALSE, message=FALSE}
+# Try a linear model - LDA
+library(MASS)
+ptm = proc.time()
+modFitLDA = train(classe~., data=training, method="lda")
+timeLDA = round( proc.time()[3] - ptm[3],3)
+saveRDS(modFitLDA, file="modFitLDA.rds")
+
+predLDA <- predict(modFitLDA, subset(test, select = -classe))
+cmLDA <-confusionMatrix(predLDA, test$classe)
+```
+
+```{r RandomForest, warning=FALSE, message=FALSE}
+# Try non-linear model - Random Forest
+library(randomForest)
+ptm = proc.time()
+modFitRF = randomForest(classe ~ ., data = training, proximity = TRUE, importance = TRUE)
+timeRF = round( proc.time()[3] - ptm[3],3)
+saveRDS(modFitRF, file="modFitRF.rds")
+
+predRF <- predict(modFitRF, subset(test, select = -classe))
+cmRF <- confusionMatrix(predRF, test$classe)
+```
+
+```{r boosting, warning=FALSE, message=FALSE}
+# Try non-linear model - Boosting
+ptm = proc.time()
+modFitGBM = train(classe~.,data=training,method="gbm",verbose=FALSE)
+timeGBM = round(proc.time()[3] - ptm[3],3)
+saveRDS(modFitGBM, file="modFitGBM.rds")
+
+predGBM <- predict(modFitGBM, subset(test, select = -classe))
+cmGBM <- confusionMatrix(predGBM, test$classe)
+```
+
+```{r results, warning=FALSE}
+summary <- cbind(c(timeLDA, timeRF, timeGBM), rbind(round(cmLDA$overall[1:2],3), round(cmRF$overall[1:2],3), round(cmGBM$overall[1:2],3)))
+rownames(summary) <- c("LDA","Random Forest", "Boosting")
+colnames(summary)[1] = "Time in secs"
+summary
+```
+Table summary shows time taken (s), accuracy and Kappa values for the 3 applied training methods.
+
+Random forest is the best method as it has the highest Accuracy and Kappa values.   
+Figure 1 plots the sample error rate.   
+```{r OOB figure, warning=FALSE, echo=FALSE}
+plot(modFitRF$err.rate[,1], type = "l", lwd = 3, col = "blue",
+     main = "Fig 1, Random Forest: OOB error rate estimate",
+     xlab = "Number of Trees", ylab = "OOB error rate")
+```
+
+## Cross-validation
+Athough random forest inherently performs cross-validation on the training set, nevertheless I perform a cross-validation on the validation set to get a true out of sample error. 
+```{r crossValidate, warning=FALSE}
+ptm = proc.time()
+# Figure 1 shows OOB error rate tapering off at about 100 trees
+modFitRFcv = randomForest(classe ~ ., data = training, ntree = 100, proximity = TRUE, importance = TRUE)
+timeRFcv = proc.time()[3] - ptm[3]
+saveRDS(modFitRFcv, file="modFitRF100cv.rds")
+
+predRFcv <- predict(modFitRFcv, subset(test, select = -classe))
+cmRFcv <- confusionMatrix(predRFcv, test$classe)
+summary = cbind(rbind(round(timeRFcv,3)), rbind(round(cmRFcv$overall[1:2],3)) )
+colnames(summary)[1] = "Time in secs"
+rownames(summary) = "Random Forest"
+summary
+```
+The cross-validated out of sample error is rate `r 1 - cmRFcv$overall[1]`.
+
+--- END of REPORT ---
+```{r}
+sessionInfo()
+```
